@@ -86,6 +86,52 @@ export interface GeneratedTopic {
   cognitive_focus: SkillDimensionName[];
 }
 
+// Topic option as presented by AI (for visual display)
+export interface PresentedTopic {
+  optionNumber: 1 | 2 | 3;
+  title: string;
+  description: string;
+  isSelected: boolean;
+  timestamp: number;
+}
+
+// Lesson plan generated after topic selection
+export interface LessonPlan {
+  topic: string;
+  diagnosticQuestions: {
+    opening: string;
+    followUps: string[];
+    misconceptionsToWatch: string[];
+  };
+  keyConcepts: Array<{
+    name: string;
+    explanation: string;
+    buildFrom?: string;
+  }>;
+  scaffoldingStrategies: {
+    forStrong: string[];
+    forStruggling: string[];
+  };
+  challengeQuestion: {
+    question: string;
+    strongResponsePattern: string;
+    strugglingResponsePattern: string;
+    scaffoldingIfStruggling: string;
+  };
+  transferConnections: {
+    domains: string[];
+    promptQuestion: string;
+  };
+  reflectionPrompts: string[];
+  timeAllocation: {
+    diagnostic: number;
+    scaffolding: number;
+    deepening: number;
+    transfer: number;
+    reflection: number;
+  };
+}
+
 // Complete session state for orchestration
 export interface SessionState {
   status: SessionStatus;

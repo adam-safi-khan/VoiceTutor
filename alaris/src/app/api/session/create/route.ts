@@ -119,7 +119,7 @@ export async function POST(request: NextRequest) {
         model: 'gpt-realtime',
         audio: {
           output: { 
-            voice: 'coral'
+            voice: 'sage'
           },
         },
       },

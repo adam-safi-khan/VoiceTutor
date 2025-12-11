@@ -166,6 +166,69 @@ export function getTutorTools(): RealtimeTool[] {
         },
         required: ['misconception', 'topic_area', 'addressed']
       }
+    },
+    {
+      type: 'function',
+      name: 'present_topic_option',
+      description: 'Call this AFTER saying the topic title and description out loud. Example flow: SAY "First, Why Do We Dream - exploring the science of sleep" THEN call this function. The user must HEAR the topic name before seeing it. You MUST call this for each of the 3 topics.',
+      parameters: {
+        type: 'object',
+        properties: {
+          option_number: {
+            type: 'string',
+            enum: ['1', '2', '3'],
+            description: 'Which option this is (1, 2, or 3)'
+          },
+          title: {
+            type: 'string',
+            description: 'The exact title you just said out loud'
+          },
+          description: {
+            type: 'string',
+            description: 'The brief hook you just said out loud'
+          }
+        },
+        required: ['option_number', 'title', 'description']
+      }
+    },
+    {
+      type: 'function',
+      name: 'confirm_topic_selection',
+      description: 'Call this when the user has indicated which topic they want to explore. This highlights their chosen topic visually.',
+      parameters: {
+        type: 'object',
+        properties: {
+          selected_option: {
+            type: 'string',
+            enum: ['1', '2', '3'],
+            description: 'Which option the user selected (1, 2, or 3)'
+          }
+        },
+        required: ['selected_option']
+      }
+    },
+    {
+      type: 'function',
+      name: 'select_topic',
+      description: 'Call this AFTER confirm_topic_selection to trigger lesson plan generation. Provide details about the chosen topic and what the user said they know.',
+      parameters: {
+        type: 'object',
+        properties: {
+          topic_title: {
+            type: 'string',
+            description: 'The title of the selected topic'
+          },
+          topic_description: {
+            type: 'string',
+            description: 'The description of the selected topic'
+          },
+          user_prior_knowledge: {
+            type: 'string',
+            description: 'What the user said they already know about this topic (or "none stated" if they didn\'t say)'
+          }
+        },
+        required: ['topic_title', 'user_prior_knowledge']
+      }
     }
   ];
 }

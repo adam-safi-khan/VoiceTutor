@@ -15,6 +15,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getTutorPrompt } from '@/lib/openai/prompts/tutorPrompt';
 import { formatToolsForSession } from '@/lib/openai/tools/tutorTools';
+import TopicSelector from './TopicSelector';
 import type { LearnerProfile } from '@/types/database-helpers';
 import type {
   SessionStatus,
@@ -27,6 +28,7 @@ import type {
   SessionMisconception,
   GeneratedTopic,
   FunctionCall,
+  PresentedTopic,
 } from '@/types/session';
 
 interface VoiceSessionProps {
@@ -52,12 +54,25 @@ export default function VoiceSession({
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [visuals, setVisuals] = useState<SessionVisual[]>([]);
   
+  // Topic presentation state
+  const [presentedTopics, setPresentedTopics] = useState<PresentedTopic[]>([]);
+  const [selectedTopicOption, setSelectedTopicOption] = useState<number | null>(null);
+  const [showTopicSelector, setShowTopicSelector] = useState(false);
+  
   // Pause state
   const [isPaused, setIsPaused] = useState(false);
   const prePauseStatusRef = useRef<SessionStatus>('connected');
   
+  // Activity tracking for better resume context
+  type ActivityState = 'greeting' | 'offering_topics' | 'awaiting_selection' | 'discussing' | 'reflecting';
+  const [currentActivity, setCurrentActivity] = useState<ActivityState>('greeting');
+  const currentActivityRef = useRef<ActivityState>('greeting');
+  
   // Restart confirmation
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
+  
+  // Transcript collapsed state (collapsed by default)
+  const [transcriptExpanded, setTranscriptExpanded] = useState(false);
   
   // Refs for WebRTC
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
@@ -90,6 +105,11 @@ export default function VoiceSession({
   useEffect(() => {
     transcriptRef.current = transcript;
   }, [transcript]);
+  
+  // Keep currentActivityRef in sync
+  useEffect(() => {
+    currentActivityRef.current = currentActivity;
+  }, [currentActivity]);
 
   // Format time as MM:SS
   const formatTime = (seconds: number): string => {
@@ -148,6 +168,43 @@ export default function VoiceSession({
     }));
   }, [elapsedSeconds]);
 
+  // Generate lesson plan when topic is selected
+  const generateLessonPlan = useCallback(async (topicTitle: string, userPriorKnowledge: string) => {
+    try {
+      const response = await fetch('/api/lesson-plan', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topicTitle,
+          userPriorKnowledge,
+          userAge: ageBracket ? parseInt(ageBracket.split('-')[0]) : undefined,
+          sessionCount,
+        })
+      });
+
+      if (!response.ok) {
+        console.error('Failed to generate lesson plan');
+        return;
+      }
+
+      const { formattedPlan } = await response.json();
+
+      // Inject lesson plan into session via session.update
+      if (dataChannelRef.current?.readyState === 'open' && formattedPlan) {
+        dataChannelRef.current.send(JSON.stringify({
+          type: 'session.update',
+          session: {
+            instructions: `[LESSON PLAN GENERATED - Follow this plan while staying responsive to the learner]\n\n${formattedPlan}`
+          }
+        }));
+        console.log('Lesson plan injected into session');
+      }
+    } catch (error) {
+      console.error('Lesson plan generation error:', error);
+    }
+  }, [ageBracket, sessionCount]);
+
   // Handle function calls from AI
   const handleFunctionCall = useCallback((functionCall: FunctionCall) => {
     const args = JSON.parse(functionCall.arguments);
@@ -155,6 +212,12 @@ export default function VoiceSession({
     switch (functionCall.name) {
       case 'transition_phase':
         setCurrentPhase(args.phase as TutorialPhase);
+        // Update activity state based on phase
+        if (args.phase === 'reflection') {
+          setCurrentActivity('reflecting');
+        } else if (args.phase !== 'warm_entry') {
+          setCurrentActivity('discussing');
+        }
         break;
         
       case 'log_skill_observation':
@@ -200,6 +263,44 @@ export default function VoiceSession({
           timestamp: Date.now()
         });
         break;
+        
+      case 'present_topic_option':
+        // Show the topic selector and add this topic
+        setShowTopicSelector(true);
+        setCurrentActivity('offering_topics');
+        setPresentedTopics(prev => {
+          // Avoid duplicates
+          const existing = prev.find(t => t.optionNumber === parseInt(args.option_number));
+          if (existing) return prev;
+          return [...prev, {
+            optionNumber: parseInt(args.option_number) as 1 | 2 | 3,
+            title: args.title,
+            description: args.description,
+            isSelected: false,
+            timestamp: Date.now()
+          }];
+        });
+        // After presenting all 3, update activity
+        if (parseInt(args.option_number) === 3) {
+          setCurrentActivity('awaiting_selection');
+        }
+        break;
+        
+      case 'confirm_topic_selection':
+        // Highlight the selected topic
+        setSelectedTopicOption(parseInt(args.selected_option));
+        setPresentedTopics(prev => prev.map(t => ({
+          ...t,
+          isSelected: t.optionNumber === parseInt(args.selected_option)
+        })));
+        break;
+        
+      case 'select_topic':
+        // Topic selected - trigger lesson plan generation
+        setCurrentActivity('discussing');
+        // Call lesson plan generation API
+        generateLessonPlan(args.topic_title, args.user_prior_knowledge || 'none stated');
+        break;
     }
     
     // Send function output back
@@ -218,7 +319,7 @@ export default function VoiceSession({
         type: 'response.create'
       }));
     }
-  }, []);
+  }, [generateLessonPlan]);
 
   // Handle data channel messages
   const handleDataChannelMessage = useCallback((event: MessageEvent) => {
@@ -313,6 +414,12 @@ export default function VoiceSession({
     setVisuals([]);
     setIsPaused(false);
     
+    // Reset topic presentation state
+    setPresentedTopics([]);
+    setSelectedTopicOption(null);
+    setShowTopicSelector(false);
+    setCurrentActivity('greeting');
+    
     // Reset refs
     skillObservationsRef.current = [];
     openLoopsRef.current = [];
@@ -390,7 +497,7 @@ export default function VoiceSession({
               input: {
                 turn_detection: { type: 'semantic_vad' }
               },
-              output: { voice: 'coral' }
+              output: { voice: 'sage' }
             }
           }
         };
@@ -483,6 +590,64 @@ export default function VoiceSession({
     }
   }, [status]);
 
+  // Get activity-specific resume context and instructions
+  const getResumeContext = useCallback(() => {
+    const activity = currentActivityRef.current;
+    
+    switch (activity) {
+      case 'greeting':
+        return {
+          context: '(The session was paused during the initial greeting.)',
+          instructions: `The tutorial was briefly paused during your greeting.
+            1. Say "Welcome back!" warmly.
+            2. Continue with your greeting and then offer the 3 topic options.
+            3. Remember to say "First...", "Second...", "Third..." as you present each option.`
+        };
+      case 'offering_topics':
+        return {
+          context: '(The session was paused while you were presenting topic options.)',
+          instructions: `The tutorial was paused while you were presenting topic options.
+            1. Say "Welcome back!" briefly.
+            2. You may have been mid-way through presenting topics. Ask if they'd like you to go through the options again.
+            3. If they say yes, re-present all 3 options clearly with "First...", "Second...", "Third...".
+            4. If they remember, ask which one interests them most.`
+        };
+      case 'awaiting_selection':
+        return {
+          context: '(The session was paused after you presented 3 topic options. I was about to choose.)',
+          instructions: `The tutorial was paused after you presented all 3 topic options.
+            1. Say "Welcome back!" briefly.
+            2. Ask which topic interested them most - do NOT re-list all topics.
+            3. If they've forgotten, offer to briefly remind them of the options.`
+        };
+      case 'discussing':
+        return {
+          context: '(The session was paused during our discussion.)',
+          instructions: `The tutorial was paused during the main discussion.
+            1. Say "Welcome back!" or "Let's continue" briefly.
+            2. Do NOT discuss the pause.
+            3. Continue exactly where you left off - if you were mid-question, repeat it.
+            4. If you were waiting for their response, indicate you're listening.`
+        };
+      case 'reflecting':
+        return {
+          context: '(The session was paused during the reflection/wrap-up phase.)',
+          instructions: `The tutorial was paused during reflection.
+            1. Say "Welcome back!" briefly.
+            2. Continue with the reflection - ask for their summary or final thoughts.
+            3. Be mindful of time - wrap up warmly.`
+        };
+      default:
+        return {
+          context: '(The session was paused briefly. I am ready to continue.)',
+          instructions: `The tutorial was briefly paused.
+            1. Acknowledge briefly: "Welcome back!" - nothing elaborate.
+            2. Continue where you left off.
+            3. Maintain your warm, Socratic tone.`
+        };
+    }
+  }, []);
+
   // Resume session
   const resumeSession = useCallback(() => {
     if (!dataChannelRef.current || dataChannelRef.current.readyState !== 'open') {
@@ -504,7 +669,10 @@ export default function VoiceSession({
       });
     }
 
-    // 3. Inject context message
+    // 3. Get activity-specific context and instructions
+    const { context, instructions } = getResumeContext();
+
+    // 4. Inject context message with specific activity state
     dataChannelRef.current.send(JSON.stringify({
       type: 'conversation.item.create',
       event_id: `resume_context_${Date.now()}`,
@@ -513,23 +681,19 @@ export default function VoiceSession({
         role: 'user',
         content: [{
           type: 'input_text',
-          text: '(The session was paused briefly. I am ready to continue.)'
+          text: context
         }]
       }
     }));
 
-    // 4. Prompt AI to continue
+    // 5. Prompt AI to continue with activity-specific instructions
     setTimeout(() => {
       if (dataChannelRef.current?.readyState === 'open' && !isPausedRef.current) {
         dataChannelRef.current.send(JSON.stringify({
           type: 'response.create',
           event_id: `resume_continue_${Date.now()}`,
           response: {
-            instructions: `The tutorial was briefly paused. 
-              1. Acknowledge briefly: "Welcome back" or "Let's continue" - nothing elaborate.
-              2. Do NOT discuss the pause or ask why they paused.
-              3. Continue exactly where you left off - repeat your last question if needed.
-              4. Maintain your warm, Socratic tone.`,
+            instructions: instructions
           }
         }));
       }
@@ -537,7 +701,7 @@ export default function VoiceSession({
 
     setIsPaused(false);
     setStatus('connected');
-  }, []);
+  }, [getResumeContext]);
 
   // Cleanup resources
   const cleanup = useCallback(() => {
@@ -672,25 +836,6 @@ export default function VoiceSession({
       {/* Connected/Paused State */}
       {(status === 'connected' || status === 'paused') && (
         <div className="space-y-6">
-          {/* Pause Overlay */}
-          {status === 'paused' && (
-            <div className="fixed inset-x-0 top-0 flex justify-center z-40">
-              <div className="mt-24 bg-white/95 backdrop-blur-sm p-4 rounded-lg shadow-lg border border-[var(--gold)]/30">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-[var(--gold)]/10 rounded-full flex items-center justify-center">
-                    <svg className="w-5 h-5 text-[var(--gold)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="font-semibold text-[var(--oxford-blue)]">Tutorial Paused</p>
-                    <p className="text-sm text-[var(--slate)]">Click Resume to continue</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* Controls Card */}
           <div className="card p-6">
             <div className="flex flex-wrap items-center justify-between gap-4">
@@ -756,53 +901,111 @@ export default function VoiceSession({
             )}
           </div>
 
-          {/* Waveform Indicator */}
-          <div className="card p-8 text-center">
-            <div className="flex items-center justify-center gap-2 mb-4">
-              {status === 'connected' ? (
-                <>
-                  <div className="w-2 h-8 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '0ms' }} />
-                  <div className="w-2 h-12 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '150ms' }} />
-                  <div className="w-2 h-6 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
-                  <div className="w-2 h-10 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '450ms' }} />
-                  <div className="w-2 h-8 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
-                </>
-              ) : (
-                <>
-                  <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
-                  <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
-                  <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
-                  <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
-                  <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
-                </>
-              )}
-            </div>
+          {/* Waveform / Topic Selection Area */}
+          <div className="card p-6 sm:p-8 text-center relative overflow-hidden min-h-[180px]">
+            {/* Pause Overlay - positioned inside the waveform card with proper padding */}
+            {status === 'paused' && (
+              <div className="absolute inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-10 p-8">
+                <div className="text-center py-4">
+                  <div className="w-16 h-16 bg-[var(--gold)]/10 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-[var(--gold)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </div>
+                  <p className="font-semibold text-[var(--oxford-blue)] text-lg mb-2">Tutorial Paused</p>
+                  <p className="text-sm text-[var(--slate)]">Click Resume above to continue</p>
+                </div>
+              </div>
+            )}
             
-            <p className="text-[var(--slate)]">
-              {status === 'connected' ? '🎙️ Listening...' : '⏸️ Paused'}
-            </p>
+            {/* Topic Selector - shown inline when topics are being presented */}
+            {showTopicSelector && presentedTopics.length > 0 ? (
+              <TopicSelector
+                topics={presentedTopics}
+                selectedOption={selectedTopicOption}
+                onDismiss={() => {
+                  setShowTopicSelector(false);
+                  setPresentedTopics([]);
+                  setSelectedTopicOption(null);
+                }}
+              />
+            ) : (
+              <>
+                {/* Waveform bars */}
+                <div className="flex items-center justify-center gap-2 mb-4">
+                  {status === 'connected' ? (
+                    <>
+                      <div className="w-2 h-8 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '0ms' }} />
+                      <div className="w-2 h-12 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '150ms' }} />
+                      <div className="w-2 h-6 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
+                      <div className="w-2 h-10 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '450ms' }} />
+                      <div className="w-2 h-8 bg-[var(--oxford-blue)] rounded-full animate-pulse" style={{ animationDelay: '600ms' }} />
+                    </>
+                  ) : (
+                    <>
+                      <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
+                      <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
+                      <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
+                      <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
+                      <div className="w-2 h-4 bg-[var(--silver)] rounded-full" />
+                    </>
+                  )}
+                </div>
+                
+                <p className="text-[var(--slate)]">
+                  {status === 'connected' ? '🎙️ Listening...' : '⏸️ Paused'}
+                </p>
+              </>
+            )}
           </div>
 
-          {/* Transcript */}
+          {/* Transcript - Collapsible */}
           {transcript.length > 0 && (
-            <div className="card p-6">
-              <h3 className="text-lg font-semibold text-[var(--oxford-blue)] mb-4">Conversation</h3>
-              <div className="space-y-3 max-h-96 overflow-y-auto">
-                {transcript.map((item, idx) => (
-                  <div 
-                    key={idx}
-                    className={`p-3 rounded-lg ${
-                      item.role === 'user' 
-                        ? 'bg-[var(--oxford-blue)]/5 ml-8' 
-                        : 'bg-[var(--cream-dark)] mr-8'
-                    }`}
-                  >
-                    <div className="text-xs text-[var(--silver)] mb-1">
-                      {item.role === 'user' ? 'You' : 'Tutor'}
+            <div className="card overflow-hidden">
+              {/* Clickable header to toggle */}
+              <button
+                onClick={() => setTranscriptExpanded(!transcriptExpanded)}
+                className="w-full p-4 flex items-center justify-between hover:bg-[var(--cream)] transition-colors"
+              >
+                <h3 className="text-lg font-semibold text-[var(--oxford-blue)]">
+                  Conversation
+                  <span className="text-sm font-normal text-[var(--slate)] ml-2">
+                    ({transcript.length} message{transcript.length !== 1 ? 's' : ''})
+                  </span>
+                </h3>
+                <svg 
+                  className={`w-5 h-5 text-[var(--slate)] transition-transform duration-200 ${transcriptExpanded ? 'rotate-180' : ''}`}
+                  fill="none" 
+                  viewBox="0 0 24 24" 
+                  stroke="currentColor"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              
+              {/* Expandable content */}
+              <div 
+                className={`transition-all duration-300 overflow-hidden ${
+                  transcriptExpanded ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'
+                }`}
+              >
+                <div className="p-4 pt-0 space-y-3 max-h-96 overflow-y-auto">
+                  {transcript.map((item, idx) => (
+                    <div 
+                      key={idx}
+                      className={`p-3 rounded-lg ${
+                        item.role === 'user' 
+                          ? 'bg-[var(--oxford-blue)]/5 ml-8' 
+                          : 'bg-[var(--cream-dark)] mr-8'
+                      }`}
+                    >
+                      <div className="text-xs text-[var(--silver)] mb-1">
+                        {item.role === 'user' ? 'You' : 'Tutor'}
+                      </div>
+                      <p className="text-[var(--charcoal)]">{item.text}</p>
                     </div>
-                    <p className="text-[var(--charcoal)]">{item.text}</p>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             </div>
           )}
