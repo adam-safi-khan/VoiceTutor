@@ -49,16 +49,12 @@ export async function POST(request: NextRequest) {
       sessionCount,
     });
 
-    if (!lessonPlan) {
-      return NextResponse.json({ error: 'Failed to generate lesson plan' }, { status: 500 });
-    }
-
-    // 4. Format for prompt injection
+    // 4. Format for prompt injection (handles null gracefully)
     const formattedPlan = formatLessonPlanForPrompt(lessonPlan);
 
     return NextResponse.json({
       success: true,
-      lessonPlan,
+      lessonPlan: lessonPlan || null,
       formattedPlan,
     });
 

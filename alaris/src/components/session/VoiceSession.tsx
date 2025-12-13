@@ -56,6 +56,8 @@ export default function VoiceSession({
   
   // Topic presentation state
   const [presentedTopics, setPresentedTopics] = useState<PresentedTopic[]>([]);
+  const [visibleTopicNumbers, setVisibleTopicNumbers] = useState<number[]>([]); // Which topics are visible
+  const [topicQueue, setTopicQueue] = useState<PresentedTopic[]>([]); // Queue of topics to display
   const [selectedTopicOption, setSelectedTopicOption] = useState<number | null>(null);
   const [showTopicSelector, setShowTopicSelector] = useState(false);
   
@@ -111,6 +113,29 @@ export default function VoiceSession({
     currentActivityRef.current = currentActivity;
   }, [currentActivity]);
 
+  // Visual queueing for topics - process queue with staggered delays
+  useEffect(() => {
+    if (topicQueue.length === 0) return;
+    
+    // Process each topic in the queue with staggered visibility
+    topicQueue.forEach((topic, index) => {
+      // Each topic becomes visible after a delay based on its position in queue
+      const delay = index * 2500; // 0ms, 2.5s, 5s
+      
+      setTimeout(() => {
+        setVisibleTopicNumbers(prev => {
+          if (prev.includes(topic.optionNumber)) return prev;
+          return [...prev, topic.optionNumber].sort();
+        });
+        
+        // Update activity state
+        if (topic.optionNumber === 3) {
+          setCurrentActivity('awaiting_selection');
+        }
+      }, delay);
+    });
+  }, [topicQueue]);
+
   // Format time as MM:SS
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -163,6 +188,8 @@ export default function VoiceSession({
     dataChannelRef.current.send(JSON.stringify({
       type: 'session.update',
       session: {
+        type: 'realtime',
+        model: 'gpt-realtime',
         instructions: timeInstruction
       }
     }));
@@ -191,14 +218,17 @@ export default function VoiceSession({
       const { formattedPlan } = await response.json();
 
       // Inject lesson plan into session via session.update
+      // Must include session.type and session.model per API requirements
       if (dataChannelRef.current?.readyState === 'open' && formattedPlan) {
         dataChannelRef.current.send(JSON.stringify({
           type: 'session.update',
           session: {
+            type: 'realtime',
+            model: 'gpt-realtime',
             instructions: `[LESSON PLAN GENERATED - Follow this plan while staying responsive to the learner]\n\n${formattedPlan}`
           }
         }));
-        console.log('Lesson plan injected into session');
+        console.log('🟢 [LESSON] Lesson plan injected into session');
       }
     } catch (error) {
       console.error('Lesson plan generation error:', error);
@@ -265,24 +295,43 @@ export default function VoiceSession({
         break;
         
       case 'present_topic_option':
-        // Show the topic selector and add this topic
+        // Add topic to queue for visual display
+        // The useEffect will handle staggered visibility
+        const optionNum = parseInt(args.option_number);
+        console.log(`🎯 [TOPIC] present_topic_option called for option ${optionNum}: "${args.title}"`);
+        
+        const newTopic: PresentedTopic = {
+          optionNumber: optionNum as 1 | 2 | 3,
+          title: args.title,
+          description: args.description,
+          isSelected: false,
+          timestamp: Date.now()
+        };
+        
         setShowTopicSelector(true);
         setCurrentActivity('offering_topics');
+        
+        // Add to presented topics (for data)
         setPresentedTopics(prev => {
-          // Avoid duplicates
-          const existing = prev.find(t => t.optionNumber === parseInt(args.option_number));
-          if (existing) return prev;
-          return [...prev, {
-            optionNumber: parseInt(args.option_number) as 1 | 2 | 3,
-            title: args.title,
-            description: args.description,
-            isSelected: false,
-            timestamp: Date.now()
-          }];
+          const existing = prev.find(t => t.optionNumber === optionNum);
+          if (existing) {
+            console.log(`🎯 [TOPIC] Option ${optionNum} already exists, skipping`);
+            return prev;
+          }
+          console.log(`🎯 [TOPIC] Adding option ${optionNum} to presentedTopics. Total: ${prev.length + 1}`);
+          return [...prev, newTopic];
         });
-        // After presenting all 3, update activity
-        if (parseInt(args.option_number) === 3) {
-          setCurrentActivity('awaiting_selection');
+        
+        // Add to queue (for visual timing)
+        setTopicQueue(prev => {
+          const existing = prev.find(t => t.optionNumber === optionNum);
+          if (existing) return prev;
+          return [...prev, newTopic];
+        });
+        
+        // Make first topic visible immediately
+        if (optionNum === 1) {
+          setVisibleTopicNumbers([1]);
         }
         break;
         
@@ -328,8 +377,12 @@ export default function VoiceSession({
       
       switch (data.type) {
         case 'session.created':
+          console.log('🟢 [LAUNCH] session.created received');
+          break;
+          
         case 'session.updated':
-          console.log('Session event:', data.type);
+          console.log('🟢 [LAUNCH] session.updated received - CONFIG APPLIED!');
+          console.log('🟢 [LAUNCH] Session ID:', data.session?.id);
           break;
           
         case 'response.done':
@@ -385,6 +438,27 @@ export default function VoiceSession({
           console.log('User stopped speaking');
           break;
           
+        case 'conversation.item.input_audio_transcription.completed':
+          // User's speech has been transcribed
+          if (data.transcript) {
+            const text = data.transcript.trim();
+            if (text) {
+              setTranscript(prev => {
+                // Avoid duplicates from other events
+                const last = prev[prev.length - 1];
+                if (last && last.role === 'user' && last.text === text) {
+                  return prev;
+                }
+                return [...prev, { 
+                  role: 'user', 
+                  text: text, 
+                  timestamp: Date.now() 
+                }];
+              });
+            }
+          }
+          break;
+          
         case 'error':
           // Filter expected pause-related errors
           const isPauseRelated = isPausedRef.current && (
@@ -416,6 +490,8 @@ export default function VoiceSession({
     
     // Reset topic presentation state
     setPresentedTopics([]);
+    setVisibleTopicNumbers([]);
+    setTopicQueue([]);
     setSelectedTopicOption(null);
     setShowTopicSelector(false);
     setCurrentActivity('greeting');
@@ -477,32 +553,66 @@ export default function VoiceSession({
       dataChannelRef.current = dc;
       
       dc.onopen = () => {
-        console.log('Data channel opened');
+        console.log('🟢 [LAUNCH] Data channel opened');
         
-        // Configure session with tools and instructions
+        // Generate the prompt
+        let instructions: string;
+        try {
+          instructions = getTutorPrompt(learnerProfile, {
+            topics: topicsRef.current,
+            sessionCount,
+            ageBracket,
+            userName
+          });
+          console.log('🟢 [LAUNCH] Prompt generated successfully');
+          console.log('🟢 [LAUNCH] Prompt length:', instructions.length, 'characters');
+          console.log('🟢 [LAUNCH] Prompt preview:', instructions.substring(0, 200) + '...');
+        } catch (err) {
+          console.error('🔴 [LAUNCH] ERROR generating prompt:', err);
+          instructions = 'You are a helpful tutor. Have a warm conversation.'; // Fallback
+        }
+        
+        // Get tools
+        let tools: ReturnType<typeof formatToolsForSession> = [];
+        try {
+          tools = formatToolsForSession();
+          console.log('🟢 [LAUNCH] Tools formatted:', tools.length, 'tools');
+        } catch (err) {
+          console.error('🔴 [LAUNCH] ERROR formatting tools:', err);
+          tools = [];
+        }
+        
+        // Configure session - per Realtime API docs (Realtime Conversations.md)
         const sessionConfig = {
           type: 'session.update',
           session: {
             type: 'realtime',
             model: 'gpt-realtime',
-            instructions: getTutorPrompt(learnerProfile, {
-              topics: topicsRef.current,
-              sessionCount,
-              ageBracket,
-              userName
-            }),
-            tools: formatToolsForSession(),
-            tool_choice: 'auto',
+            instructions: instructions,
             audio: {
               input: {
-                turn_detection: { type: 'semantic_vad' }
+                turn_detection: {
+                  type: 'semantic_vad'
+                }
               },
-              output: { voice: 'sage' }
-            }
+              output: {
+                voice: 'sage'
+              }
+            },
+            tools: tools,
+            tool_choice: 'auto'
           }
         };
         
-        dc.send(JSON.stringify(sessionConfig));
+        console.log('🟢 [LAUNCH] Session config prepared');
+        console.log('🟢 [LAUNCH] Config keys:', Object.keys(sessionConfig.session));
+        
+        try {
+          dc.send(JSON.stringify(sessionConfig));
+          console.log('🟢 [LAUNCH] Session config SENT to OpenAI');
+        } catch (err) {
+          console.error('🔴 [LAUNCH] ERROR sending session config:', err);
+        }
       };
       
       dc.onmessage = handleDataChannelMessage;
@@ -857,7 +967,7 @@ export default function VoiceSession({
                 </div>
                 
                 <div className="text-sm text-[var(--slate)] hidden sm:block">
-                  Phase: {currentPhase.replace('_', ' ')}
+                  Session in Progress
                 </div>
               </div>
 
@@ -922,10 +1032,13 @@ export default function VoiceSession({
             {showTopicSelector && presentedTopics.length > 0 ? (
               <TopicSelector
                 topics={presentedTopics}
+                visibleNumbers={visibleTopicNumbers}
                 selectedOption={selectedTopicOption}
                 onDismiss={() => {
                   setShowTopicSelector(false);
                   setPresentedTopics([]);
+                  setVisibleTopicNumbers([]);
+                  setTopicQueue([]);
                   setSelectedTopicOption(null);
                 }}
               />

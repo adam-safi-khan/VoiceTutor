@@ -27,7 +27,7 @@ async function getUserData() {
   const { data: userRecord } = await supabase
     .from('users')
     .select('full_name, age_bracket, session_count')
-    .eq('auth_id', user.id)
+    .eq('id', user.id)
     .single();
   
   return {

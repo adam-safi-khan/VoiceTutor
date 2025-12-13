@@ -95,34 +95,65 @@ export interface PresentedTopic {
   timestamp: number;
 }
 
-// Lesson plan generated after topic selection
+// Lesson plan generated after topic selection (enhanced schema)
 export interface LessonPlan {
   topic: string;
+  
+  // Core factual content requirements
+  coreFacts?: {
+    definitions: string[];  // Terms to define
+    theories: string[];     // Frameworks to introduce
+    evidence: string[];     // Studies/data to mention
+  };
+  
   diagnosticQuestions: {
     opening: string;
     followUps: string[];
     misconceptionsToWatch: string[];
   };
+  
   keyConcepts: Array<{
     name: string;
     explanation: string;
     buildFrom?: string;
+    checkQuestion?: string;  // Question to verify understanding
+    depthTarget?: 'surface' | 'working' | 'teaching';
   }>;
+  
+  // Question bank by type and difficulty
+  questionBank?: {
+    simple: string[];      // Entry-level questions
+    probing: string[];     // Push for mechanism/evidence
+    challenging: string[]; // For when they're flying
+    transfer: string[];    // Connecting to life/domains
+  };
+  
   scaffoldingStrategies: {
     forStrong: string[];
     forStruggling: string[];
   };
+  
   challengeQuestion: {
     question: string;
     strongResponsePattern: string;
     strugglingResponsePattern: string;
     scaffoldingIfStruggling: string;
   };
+  
+  // Visual moment triggers
+  visualTriggers?: Array<{
+    when: string;
+    type: 'diagram' | 'chart' | 'concept_map' | 'timeline' | 'comparison';
+    description: string;
+  }>;
+  
   transferConnections: {
     domains: string[];
     promptQuestion: string;
   };
+  
   reflectionPrompts: string[];
+  
   timeAllocation: {
     diagnostic: number;
     scaffolding: number;
@@ -171,6 +202,7 @@ export type RealtimeEventType =
   | 'response.output_audio_transcript.delta'
   | 'conversation.item.added'
   | 'conversation.item.done'
+  | 'conversation.item.input_audio_transcription.completed'
   | 'input_audio_buffer.speech_started'
   | 'input_audio_buffer.speech_stopped'
   | 'error';

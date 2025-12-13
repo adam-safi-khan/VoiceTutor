@@ -29,6 +29,9 @@ const DEFAULT_PROFILE: LearnerProfile = {
 };
 
 export async function POST(request: NextRequest) {
+  console.log('\n========== SESSION CREATE API ==========');
+  console.log('🟢 [API] Session creation started');
+  
   try {
     // 1. Authenticate user from session cookie
     const cookieStore = await cookies();
@@ -48,11 +51,13 @@ export async function POST(request: NextRequest) {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     
     if (authError || !user) {
+      console.log('🔴 [API] Auth failed:', authError?.message);
       return NextResponse.json(
         { error: 'Unauthorized. Please sign in.' },
         { status: 401 }
       );
     }
+    console.log('🟢 [API] User authenticated:', user.id);
 
     // 2. Check daily session limit
     const { data: canStart, error: limitError } = await supabaseAdmin
@@ -81,7 +86,7 @@ export async function POST(request: NextRequest) {
       supabaseAdmin
         .from('users')
         .select('full_name, age_bracket, session_count')
-        .eq('auth_id', user.id)
+        .eq('id', user.id)
         .single(),
       supabaseAdmin
         .from('memories')
@@ -96,6 +101,8 @@ export async function POST(request: NextRequest) {
     const userName = userRecord?.full_name || user.user_metadata?.full_name || '';
 
     const learnerProfile: LearnerProfile = memoryResult.data?.profile_json || DEFAULT_PROFILE;
+    console.log('🟢 [API] Learner profile loaded');
+    console.log('🟢 [API] Session count:', sessionCount, '| Age bracket:', ageBracket);
 
     // 4. Generate topic options (run in parallel with OpenAI token request)
     // Use quick topics first, then generate in background if needed
@@ -173,6 +180,11 @@ export async function POST(request: NextRequest) {
       // Don't fail - session can still work
     }
 
+    console.log('🟢 [API] Topics generated:', topics.map(t => t.title).join(', '));
+    console.log('🟢 [API] Ephemeral key obtained');
+    console.log('🟢 [API] Session ID:', sessionRecord?.id);
+    console.log('========== SESSION CREATE COMPLETE ==========\n');
+    
     return NextResponse.json({
       ephemeralKey: data.value,
       learnerProfile,
